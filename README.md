@@ -106,10 +106,10 @@ Delta pruning counts agreed on all 144 checks.
 
 | Hypothesis | Ordered arrival | Shuffled arrival |
 |---|---|---|
-| **H1** (registered): day partitioning plans fewer files *and* bytes for date queries | not supported | not supported |
+| **H1** (registered): day partitioning plans fewer files *and* bytes for date queries | not supported | not supported (registered expectation was "supported") |
 | **H1b** (Amendment 1, bytes only, defined after a dry run) | supported, one day 2.53x fewer bytes, seven days 1.07x | supported, one day **28.2x** fewer bytes, seven days 4.04x |
 | **H2** (registered): sorting by user plans fewer files for user queries | not supported | not supported |
-| **H2b** (bytes only) | not supported: sorted files are *bigger*, 0.84x | "supported" at 1.11x, but the same 300 files are planned: this is better compression of sorted data, not pruning |
+| **H2b** (Amendment 1, bytes only) | not supported: sorted files are *bigger*, 0.84x | "supported" at 1.11x, but the same 300 files are planned and the whole sorted table is 10% smaller (70.9 vs 78.6 MiB): a size difference, not pruning (cause not isolated) |
 | **H3**: compaction cuts files by >= 10x, results unchanged | supported for L0, L1, L2 (17.6x to 500x) | supported (500x; 15,000 files to 30) |
 
 H1 fails for a reason the registration missed: day partitioning splits every append into one
@@ -119,7 +119,8 @@ the bytes reading in the open.
 
 ### What the numbers say
 
-1. **Partitioning by day pays off only when arrival order does not already cluster time.**
+1. **Partitioning by day pays off far more when arrival order does not already cluster time**
+   (28.2x vs 2.5x fewer bytes for one day).
    Appending in time order gave the unpartitioned table files with narrow `event_ts` ranges, so
    a one-day query already planned 1 of 10 files (4.6 MiB); partitioning cut that to 1.8 MiB.
    With shuffled arrival the unpartitioned table had to read everything (73.9 MiB) and the
@@ -130,28 +131,34 @@ the bytes reading in the open.
    | Ordered arrival | 1/10 files · 4.6 MiB | 1/39 files · 1.8 MiB |
    | Shuffled arrival | 10/10 files · 73.9 MiB | 10/300 files · 2.6 MiB |
 
-2. **Sorting by user did nothing at the default file size, and cost space.** At PyIceberg's
+2. **Sorting by user did nothing for user queries at the default file size.** At PyIceberg's
    512 MiB target each day partition of an append is one file holding every user id, so min/max
-   pruning cannot skip it. In time order the sorted table was 20% larger (66.8 vs 55.8 MiB
+   pruning cannot skip it. Its effect on size depended on arrival: in time order the sorted
+   table was 20% larger (66.8 vs 55.8 MiB
    planned for a user lookup), most likely because timestamps compress worse once rows are
-   ordered by user (the cause was not isolated).
+   ordered by user (the cause was not isolated); with shuffled arrival it was 10% smaller
+   (70.9 vs 78.6 MiB).
 
-3. **Sorting plus small files is what makes user lookups cheap.** With a 1 MiB target (L2s,
+3. **Sorted small files are where the user-lookup gain appeared** (no unsorted small-file
+   control was run, so the two changes are not separated). With a 1 MiB target (L2s,
    measured in in-memory Arrow bytes; on disk the files average about 160 KB, 63.6 MiB in 399) each day partition splits into
    files covering disjoint user ranges. The user lookup then planned 39 of 399 files and
    **5.3 MiB instead of 55.8 MiB (10.5x less)**; the user-and-week query 1.2 vs 12.8 MiB. The
-   price is ten times as many files. With shuffled arrival each partition of an append was only
-   just over 1 MiB, so it split in two and the gain shrank to 1.43x.
+   price is ten times as many files. This is the bytes-only reading (H2b-L2s, Amendment 1); the
+   registered sensitivity rule H2-L2s, which counts files, was not supported (39 vs 39 files
+   planned). With shuffled arrival L2s wrote 600 files against L2's 300, so each partition split
+   roughly in two, and the gain shrank to 1.43x.
 
 4. **500 tiny appends make metadata and storage worse, and compaction fixes both.** Shuffled
    tiny appends wrote 15,000 files and 500 manifests for one 5M-row table; the user lookup
    planned 118.4 MiB. Compaction left 30 files and 1 manifest, and the same query planned
-   55.9 MiB: half the bytes were small-file overhead.
+   55.9 MiB, about half.
 
-5. **Compaction can make queries worse.** The unpartitioned table, compacted into a single
-   file, lost the time clustering that its 500 ordered appends had given it: the one-day query
-   went from 1.9 MiB planned to **40.1 MiB (21x more)**. Compacting without a layout throws
-   away pruning; the partitioned and small-file layouts kept theirs (one day 1.8 MiB, user
+5. **Compaction can make queries worse.** The unpartitioned table built from time-ordered
+   appends, compacted into a single file, lost the time clustering those appends had given it: the one-day query
+   went from 1.9 MiB planned to **40.1 MiB (21x more)**. With shuffled appends there was no
+   clustering to lose, and compacting L0 improved every query (82.4 to 40.1 MiB). The
+   partitioned and small-file layouts kept their pruning (one day 1.8 MiB, user
    lookup on L2s 5.2 MiB after compaction).
 
 | Compaction, regime B2 → B2c | Files | One-day query | User lookup |
@@ -191,7 +198,7 @@ uv run lakehouse --warehouse warehouse evolve-schema
 uv run lakehouse --warehouse warehouse workload-report --rows 50000 --jobs 4 --out results
 ```
 
-The reported run is `workload-report --rows 5000000 --jobs 6`. `lakehouse render` rebuilds
+The reported run is `workload-report --rows 5000000 --jobs 5`. `lakehouse render` rebuilds
 `REPORT.md` from `results/pruning.csv` without re-running anything.
 
 **MinIO (optional).** `docker compose up -d` starts MinIO on port 9000 (console 9001, dev
@@ -211,7 +218,8 @@ The MinIO run is a smoke check, not part of the measurement.
 - **Choose the clustering key from the query log.** User lookups only got cheap with sorted,
   small files. At scale I'd measure which predicates dominate and use Z-order or a bucket
   partition on `user_id` instead of guessing, and re-run this harness to check the bytes.
-- **Commit throughput.** Each PyIceberg commit cost about 0.3 s here; thousands of tiny appends
+- **Commit throughput.** Each PyIceberg commit cost roughly 0.3 s on this machine (build notes;
+  timing is not part of the reported results); thousands of tiny appends
   an hour need batching upstream (a stream buffer or micro-batches) before they reach the table.
 - **Snapshot expiry.** Time travel kept every old file alive; production needs a retention
   window and `expire_snapshots`, or storage grows with every compaction.

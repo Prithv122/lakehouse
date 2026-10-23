@@ -24,8 +24,8 @@ and bytes it fetches, and that is decided by the planner before any data is read
 pruning, then min/max statistics per file. Those counts are deterministic, so CI can test them
 and a test runs the whole grid twice, once in parallel, and checks every number matches. The
 limit is that planned bytes are an upper bound on what a reader fetches; a Parquet reader can
-still skip row groups inside a planned file. I count matching row groups as an exploratory extra
-and say so.
+still skip row groups inside a planned file. Counting matching row groups was planned as an
+exploratory extra but was not collected in the reported run.
 
 ### Q3. What surprised you?
 
@@ -43,13 +43,15 @@ bytes-only reading as a labelled amendment, rather than quietly changing the rul
 _A:_ On 5 million rows, with all correctness gates passing: day partitioning cut a one-day
 query from 73.9 MiB to 2.6 MiB planned when events arrived shuffled, but only from 4.6 to
 1.8 MiB when they arrived in time order, because time-ordered appends already cluster the data.
-Sorting by user did nothing at the default 512 MiB file size and made files 20% bigger; with
-sorted 1 MiB files a user lookup dropped from 55.8 to 5.3 MiB, at the price of ten times as many
-files. 500 tiny shuffled appends made 15,000 files and doubled the bytes a query planned, and
-compaction fixed that (15,000 files to 30). The surprise was the other direction: compacting the
-unpartitioned table into one file made the one-day query read 21 times more, 1.9 to 40.1 MiB,
+Sorting by user did nothing for user queries at the default 512 MiB file size (and made the
+time-ordered table 20% bigger); with sorted 1 MiB files a user lookup dropped from 55.8 to
+5.3 MiB in time-ordered arrival (1.4x when shuffled), at the price of ten times as many files.
+500 tiny shuffled appends made 15,000 files, and the user lookup planned roughly twice the bytes
+of the compacted table (118.4 vs 55.9 MiB); compaction took it to 30 files. The surprise was the other direction: compacting the
+unpartitioned, time-ordered table into one file made the one-day query read 21 times more, 1.9 to 40.1 MiB,
 because compaction threw away the clustering the small appends had. So my answer to "should we
-compact?" is "yes, but per partition and with a sort order, or you can make reads worse". On the
+compact?" is "yes, but per partition, and with a sort order plus a small target file size if you want
+user-key pruning, or you can make reads worse". On the
 registered hypotheses: H1 and H2 were not supported as written, H3 was; the bytes-only reading
 supported H1 in both arrival orders.
 
