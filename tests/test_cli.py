@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 
+import pyarrow.parquet as pq
+
+from lakehouse import spec, tables
+from lakehouse.catalog import get_catalog
 from lakehouse.cli import main
 
 
@@ -26,7 +30,27 @@ def test_init_ingest_evolve_time_travel_compact(tmp_path, capsys):
     assert "rewritten 0" in capsys.readouterr().out
 
     assert main(["--warehouse", wh, "compact"]) == 0
-    assert "rows 2,000" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "rows 2,000" in out
+    assert "compacted (L1, inferred)" in out  # ingest default layout is L1
+
+
+def test_compact_infers_layout_from_the_table_and_honours_an_explicit_one(tmp_path, capsys):
+    wh = str(tmp_path / "wh")
+    assert main(["--warehouse", wh, "init"]) == 0
+    ingest = ["--warehouse", wh, "ingest", "--rows", "1500", "--batches", "3", "--layout", "L2"]
+    assert main(ingest) == 0
+    capsys.readouterr()
+
+    assert main(["--warehouse", wh, "compact"]) == 0
+    assert "compacted (L2, inferred)" in capsys.readouterr().out
+    table = get_catalog(wh).load_table("lake.events")
+    for path in tables.data_file_paths(table):  # sorted by the L2 key, not by event_id
+        f = pq.read_table(path, columns=[c for c, _ in spec.SORT_KEY])
+        assert f.equals(f.sort_by(list(spec.SORT_KEY)))
+
+    assert main(["--warehouse", wh, "compact", "--layout", "L1"]) == 0
+    assert "compacted (L1):" in capsys.readouterr().out
 
 
 def test_workload_report_writes_results_and_rerenders(tmp_path, capsys):
