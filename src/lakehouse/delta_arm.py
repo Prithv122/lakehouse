@@ -195,6 +195,47 @@ def delta_stats_planned(path: str | Path, query: spec.Query, version: int | None
     return int(sum(stats_could_match(actions, query.preds)))
 
 
+def _sql_literal(value: int | str | dt.datetime) -> str:
+    """A predicate value as a SQL literal for delta-rs's `file_pruning_predicate`.
+
+    Timestamps are a quoted ISO-8601 string with six fractional digits and a `Z` suffix, which
+    the engine casts to the column's UTC timestamp type at microsecond precision. A seconds-only
+    string loses sub-second bounds, and `TIMESTAMP '...'` is rejected for a UTC column.
+    """
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is None:
+            raise ValueError(f"naive datetime in predicate: {value!r}")
+        return f"'{value.astimezone(dt.UTC):%Y-%m-%dT%H:%M:%S.%fZ}'"
+    if isinstance(value, bool):
+        raise TypeError("boolean predicate values are not part of the spec")
+    if isinstance(value, int):
+        return str(value)
+    return "'" + value.replace("'", "''") + "'"
+
+
+def native_predicate(preds: tuple[spec.Pred, ...]) -> str | None:
+    """SQL predicate string for delta-rs's own file pruning (None when there are no predicates)."""
+    if not preds:
+        return None
+    sql_op = {"==": "=", ">=": ">=", "<": "<"}
+    return " AND ".join(f"{p.column} {sql_op[p.op]} {_sql_literal(p.value)}" for p in preds)
+
+
+def delta_native_planned(path: str | Path, query: spec.Query, version: int | None = None) -> int:
+    """Number of files delta-rs's own `DeltaTable.file_uris(file_pruning_predicate=...)` keeps.
+
+    A third route to the planned-file count, next to the dataset fragments (the reported number)
+    and our own statistics evaluator. Meant to agree with both; where a file's timestamp maximum
+    sits within 1 ms below a bound, delta-rs's native pruning can be tighter than the fragment
+    path's 1 ms widening, which is a conservative superset.
+    """
+    dtab = _open(path, version)
+    predicate = native_predicate(query.preds)
+    if predicate is None:
+        return len(dtab.file_uris())
+    return len(dtab.file_uris(file_pruning_predicate=predicate))
+
+
 def _planned_paths(dtab: DeltaTable, query: spec.Query) -> set[str]:
     """Table-relative paths of the files the dataset's fragments keep for the predicate."""
     dataset = dtab.to_pyarrow_dataset()

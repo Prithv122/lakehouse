@@ -264,6 +264,77 @@ def test_engine_file_pruning_predicate_agrees_too(built) -> None:
     )
 
 
+def test_native_predicate_strings() -> None:
+    q = spec.QUERY_BY_NAME
+    assert da.native_predicate(q["Q6_full_agg"].preds) is None
+    assert da.native_predicate(q["Q1_point_user"].preds) == "user_id = 137"
+    assert da.native_predicate(q["Q4_purchases"].preds) == "event_name = 'purchase'"
+    assert da.native_predicate(q["Q2_one_day"].preds) == (
+        "event_ts >= '2026-01-11T00:00:00.000000Z' AND event_ts < '2026-01-12T00:00:00.000000Z'"
+    )
+    assert da._sql_literal("o'brien") == "'o''brien'"
+    with pytest.raises(ValueError, match="naive"):
+        da._sql_literal(dt.datetime(2026, 1, 1))
+
+
+def assert_three_routes_agree(path: Path, version: int | None = None) -> None:
+    for query in spec.QUERIES:
+        fragments = da.delta_plan_metrics(path, query, version).files_planned
+        native = da.delta_native_planned(path, query, version)
+        own = da.delta_stats_planned(path, query, version)
+        assert fragments == native == own, (query.name, fragments, native, own)
+
+
+@pytest.mark.parametrize("layout", ["L0", "L1"])
+def test_fragments_native_and_own_evaluator_agree_on_time_sliced_appends(built, layout) -> None:
+    assert_three_routes_agree(built[layout][0])
+
+
+def test_three_routes_agree_at_an_older_version(built) -> None:
+    path, versions = built["L0"]
+    assert_three_routes_agree(path, versions[1])
+    # an older version has fewer files, so the count must differ from the latest for Q6
+    q6 = spec.QUERY_BY_NAME["Q6_full_agg"]
+    assert da.delta_native_planned(path, q6, versions[1]) < da.delta_native_planned(path, q6)
+
+
+def test_three_routes_agree_on_a_sorted_single_day_l2s_table(tmp_path: Path) -> None:
+    big = make_events(120_000, 0, 10, 1, seed=3, users=2000)
+    path = tmp_path / "l2s"
+    da.write_delta(path, [big], "L2s")
+    assert da.delta_files(path).num_rows > 2
+    assert_three_routes_agree(path)
+    q1 = spec.QUERY_BY_NAME["Q1_point_user"]
+    assert da.delta_native_planned(path, q1) < da.delta_files(path).num_rows  # it does prune
+
+
+def test_native_pruning_at_microsecond_bounds_is_never_below_the_truth(tmp_path: Path) -> None:
+    # One row per file at each bound +-1 us. Native and fragment counts may differ by files whose
+    # stored (ms-truncated) maximum is within 1 ms of the bound, but neither may drop a match.
+    d10, d11 = spec.Q_DAY, spec.Q_DAY + dt.timedelta(days=1)
+    stamps = [d10 - US, d10, d10 + US, d11 - US, d11, d11 + US]
+    base = make_events(len(stamps), 0, 10, 2, seed=9)
+    rows = []
+    for i, ts in enumerate(stamps):
+        one = base.slice(i, 1)
+        rows.append(
+            one.set_column(
+                2, spec.ARROW_SCHEMA_V1.field("event_ts"), pa.array([ts], pa.timestamp("us", "UTC"))
+            )
+        )
+    for layout in ("L0", "L1"):
+        path = tmp_path / layout
+        da.write_delta(path, rows, layout)
+        for op in (">=", "<"):
+            for bound in stamps:
+                query = spec.Query("b", "", (spec.Pred("event_ts", op, bound),))
+                truth = int(sum((ts >= bound) if op == ">=" else (ts < bound) for ts in stamps))
+                native = da.delta_native_planned(path, query)
+                frag = da.delta_plan_metrics(path, query).files_planned
+                assert native >= truth and frag >= truth, (layout, op, bound)
+                assert native <= frag  # native is the tighter (or equal) of the two
+
+
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_plan_metrics_are_consistent(built, batches, layout: str) -> None:
     path, _ = built[layout]
