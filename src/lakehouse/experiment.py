@@ -8,8 +8,10 @@ import platform
 import shutil
 import statistics
 import subprocess
+import sys
 import time
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,7 +21,7 @@ import pyarrow.compute as pc
 from lakehouse import delta_arm, tables
 from lakehouse.catalog import ensure_namespace, get_catalog, is_s3
 from lakehouse.gen import generate_events, generate_v2_events
-from lakehouse.pruning import plan_metrics
+from lakehouse.pruning import plan_files_only, plan_metrics
 from lakehouse.report import Gate
 from lakehouse.spec import (
     LARGE_BATCHES,
@@ -31,7 +33,13 @@ from lakehouse.spec import (
     PlanMetrics,
     Query,
 )
-from lakehouse.workload import apply_query, canonicalize, fingerprint, run_iceberg
+from lakehouse.workload import (
+    apply_query,
+    canonicalize,
+    fingerprint,
+    run_iceberg,
+    to_iceberg_expr,
+)
 
 ROWS_QUERY = QUERIES[0]  # any rows-kind query: canonicalize() only needs the kind
 TIMING_REPEATS = 5
@@ -50,6 +58,7 @@ class GridConfig:
     rowgroups: bool = False
     timing: bool = False
     namespace: str = "bench"
+    note: str = ""  # what else was running on the machine, recorded in the report
 
 
 @dataclass
@@ -67,8 +76,11 @@ def same_rows(a: pa.Table, b: pa.Table) -> bool:
 class _Checks:
     """Collects gate failures; a gate passes when it has run at least once with no problem."""
 
+    REQUIRED = ("G1", "G2", "G3", "G4")
+
     def __init__(self) -> None:
-        self.problems: dict[str, list[str]] = {g: [] for g in ("G1", "G2", "G3", "G4")}
+        # D1 (Delta cross-check) is reported only when the Delta arm ran.
+        self.problems: dict[str, list[str]] = {g: [] for g in (*self.REQUIRED, "D1")}
         self.ran: dict[str, int] = dict.fromkeys(self.problems, 0)
 
     def check(self, gate: str, ok: bool, what: str) -> None:
@@ -79,6 +91,8 @@ class _Checks:
     def gates(self) -> list[Gate]:
         out = []
         for name, probs in self.problems.items():
+            if name not in self.REQUIRED and self.ran[name] == 0:
+                continue
             if self.ran[name] == 0:
                 out.append(Gate(name, False, "not run"))
             elif probs:
@@ -160,8 +174,9 @@ def _measure_iceberg(table, cell, cfg, checks, oracle) -> list[MetricRow]:
         result = run_iceberg(table, q)
         extra = {}
         if cfg.timing:
-            extra["plan_ms"] = str(_median_ms(lambda q=q: plan_metrics(table, q)))
-            extra["scan_ms"] = str(_median_ms(lambda q=q: run_iceberg(table, q)))
+            expr = to_iceberg_expr(q.preds)
+            extra["plan_ms"] = str(_median_ms(lambda q=q: plan_files_only(table, q)))
+            extra["scan_ms"] = str(_median_ms(lambda e=expr: table.scan(row_filter=e).to_arrow()))
         row = _row("iceberg", cell, cfg, q, snapshot, pm, result, extra)
         _check_result(checks, oracle, row, q)
         out.append(row)
@@ -175,8 +190,16 @@ def _measure_delta(path: str, cell, cfg, checks, oracle) -> list[MetricRow]:
         pm = delta_arm.delta_plan_metrics(path, q)
         result = delta_arm.run_delta(path, q)
         own = delta_arm.delta_stats_planned(path, q)
-        row = _row("delta", cell, cfg, q, version, pm, result, {"own_eval_files": str(own)})
+        native = delta_arm.delta_native_planned(path, q)
+        extra = {"own_eval_files": str(own), "native_files": str(native)}
+        row = _row("delta", cell, cfg, q, version, pm, result, extra)
         _check_result(checks, oracle, row, q)
+        where = f"delta/{row.layout}/{row.regime}/{row.arrival}/{q.name}"
+        checks.check(
+            "D1",
+            pm.files_planned == native == own,
+            f"{where}: fragments {pm.files_planned}, native {native}, evaluator {own}",
+        )
         out.append(row)
     return out
 
@@ -268,21 +291,31 @@ def _schema_evolution(catalog, data, b1, cfg, checks, log) -> None:
     t.append(v2.cast(t.schema().as_arrow()))
     new = t.scan().to_arrow()
     checks.check("G3", new.num_rows == data.num_rows + v2.num_rows, "v2 append row count")
-    added = new.filter(pc.greater_equal(new["event_id"], cfg.rows))
+    added = new.filter(pc.greater_equal(new["event_id"], cfg.rows)).sort_by("event_id")
     checks.check(
         "G3",
-        added.num_rows == v2.num_rows and added["country"].null_count == v2["country"].null_count,
-        "v2 rows lost their country values",
+        added.select(v2.column_names).cast(v2.schema).equals(v2.sort_by("event_id")),
+        "v2 rows read back differ from the v2 rows written",
     )
 
 
 def _git_state() -> str:
+    """Commit of this checkout, flagged when tracked files differ from it."""
+    repo = Path(__file__).resolve().parents[2]
     try:
         sha = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
         dirty = subprocess.run(
-            ["git", "status", "--porcelain"], capture_output=True, text=True, check=True
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
         return sha + (" (dirty tree)" if dirty else "")
     except (OSError, subprocess.CalledProcessError):
@@ -306,45 +339,98 @@ def _meta(cfg: GridConfig, started: dt.datetime) -> dict:
         "deltalake": md.version("deltalake"),
         "pyarrow": md.version("pyarrow"),
         "started_utc": started.isoformat(timespec="seconds"),
+        "note": cfg.note,
     }
 
 
-def run_grid(cfg: GridConfig, log: Callable[[str], None] = print) -> GridResult:
+def _oracle(data: pa.Table) -> dict[str, tuple[str, int]]:
+    out = {}
+    for q in QUERIES:
+        truth = apply_query(data, q)
+        out[q.name] = (fingerprint(truth), truth.num_rows)
+    return out
+
+
+def _cell_warehouse(cfg: GridConfig, arrival: str, layout: str) -> str:
+    """Each (arrival, layout) gets its own warehouse and catalog file, so cells can run in
+    separate processes without sharing a SQLite catalog."""
+    return f"{str(cfg.warehouse).rstrip('/')}/cells/{arrival}_{layout}".lower()
+
+
+def _run_cell(cfg: GridConfig, arrival: str, layout: str, engine: str, verbose: bool):
+    """One (arrival, layout, engine) cell, self-contained so it can run in a worker process.
+
+    The data are regenerated from the seed rather than shipped between processes: generation is
+    deterministic and cheaper than pickling millions of rows.
+    """
+    log = (lambda m: print(m, file=sys.stderr, flush=True)) if verbose else (lambda _m: None)
+    t0 = time.perf_counter()
+    data = generate_events(cfg.rows, cfg.seed)
+    oracle = _oracle(data)
+    b1 = tables.split_batches(data, cfg.large_batches, arrival, cfg.seed)
+    b2 = tables.split_batches(data, cfg.tiny_batches, arrival, cfg.seed)
+    checks = _Checks()
+    if engine == "iceberg":
+        wh = _cell_warehouse(cfg, arrival, layout)
+        catalog_dir = None if not is_s3(wh) else Path(".lakehouse") / f"{arrival}_{layout}"
+        catalog = get_catalog(wh, catalog_dir=catalog_dir)
+        ensure_namespace(catalog, cfg.namespace)
+        rows = _iceberg_cells(catalog, data, arrival, layout, b1, b2, cfg, checks, oracle, log)
+    else:
+        root = Path(cfg.warehouse) / "delta"
+        rows = _delta_cells(root, data, arrival, layout, b1, b2, cfg, checks, oracle, log)
+    log(f"  {engine} {layout}/{arrival} done in {time.perf_counter() - t0:.0f} s")
+    return rows, checks.problems, checks.ran
+
+
+def run_grid(
+    cfg: GridConfig,
+    log: Callable[[str], None] = print,
+    jobs: int = 1,
+    verbose: bool = False,
+) -> GridResult:
+    """Run every cell, then the schema-evolution gate.
+
+    `jobs` > 1 runs cells in worker processes; `verbose` makes every cell print its progress to
+    stderr (from workers too, where `log` cannot reach). The metrics come from table metadata,
+    so they do not depend on scheduling; wall-clock timing does, so it needs `jobs` = 1.
+    """
     started = dt.datetime.now(dt.UTC)
     if cfg.tiny_batches > cfg.rows or cfg.large_batches > cfg.rows:
         raise ValueError("more batches than rows")
     if cfg.delta and is_s3(cfg.warehouse):
         raise ValueError("the Delta arm runs on a local warehouse only")
+    if cfg.timing and jobs != 1:
+        raise ValueError("timing needs jobs=1: parallel cells would slow each other down")
 
-    log(f"generating {cfg.rows:,} rows (seed {cfg.seed})")
-    data = generate_events(cfg.rows, cfg.seed)
-    oracle = {}
-    for q in QUERIES:
-        truth = apply_query(data, q)
-        oracle[q.name] = (fingerprint(truth), truth.num_rows)
+    if not is_s3(cfg.warehouse):
+        for sub in ("cells", "delta"):
+            shutil.rmtree(Path(cfg.warehouse) / sub, ignore_errors=True)
 
-    catalog = get_catalog(cfg.warehouse)
-    ensure_namespace(catalog, cfg.namespace)
-    delta_root = None
-    if cfg.delta:
-        delta_root = Path(cfg.warehouse) / "delta"
-        shutil.rmtree(delta_root, ignore_errors=True)
+    engines = ("iceberg", "delta") if cfg.delta else ("iceberg",)
+    cells = [(a, layout, e) for a in cfg.arrivals for layout in cfg.layouts for e in engines]
+    log(f"{len(cells)} cells, {cfg.rows:,} rows, seed {cfg.seed}, jobs {jobs}")
+    if jobs == 1:
+        results = [_run_cell(cfg, a, layout, e, verbose) for a, layout, e in cells]
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = [pool.submit(_run_cell, cfg, a, layout, e, verbose) for a, layout, e in cells]
+            results = [f.result() for f in futures]  # in cell order, whatever finishes first
 
     checks = _Checks()
     rows: list[MetricRow] = []
-    for arrival in cfg.arrivals:
-        b1 = tables.split_batches(data, cfg.large_batches, arrival, cfg.seed)
-        b2 = tables.split_batches(data, cfg.tiny_batches, arrival, cfg.seed)
-        for layout in cfg.layouts:
-            rows += _iceberg_cells(catalog, data, arrival, layout, b1, b2, cfg, checks, oracle, log)
-            if delta_root is not None:
-                rows += _delta_cells(
-                    delta_root, data, arrival, layout, b1, b2, cfg, checks, oracle, log
-                )
+    for cell_rows, problems, ran in results:
+        rows += cell_rows
+        for gate, probs in problems.items():
+            checks.problems[gate] += probs
+            checks.ran[gate] += ran[gate]
 
+    data = generate_events(cfg.rows, cfg.seed)
+    catalog = get_catalog(cfg.warehouse)
     b1_ordered = tables.split_batches(data, cfg.large_batches, "ordered", cfg.seed)
     _schema_evolution(catalog, data, b1_ordered, cfg, checks, log)
 
     meta = _meta(cfg, started)
+    meta["jobs"] = jobs
     meta["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     return GridResult(rows=rows, gates=checks.gates(), meta=meta, problems=checks.problems)
