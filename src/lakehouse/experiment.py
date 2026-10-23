@@ -396,6 +396,7 @@ def run_grid(
     so they do not depend on scheduling; wall-clock timing does, so it needs `jobs` = 1.
     """
     started = dt.datetime.now(dt.UTC)
+    meta = _meta(cfg, started)  # git state as of the start, before anything can change
     if cfg.tiny_batches > cfg.rows or cfg.large_batches > cfg.rows:
         raise ValueError("more batches than rows")
     if cfg.delta and is_s3(cfg.warehouse):
@@ -430,7 +431,6 @@ def run_grid(
     b1_ordered = tables.split_batches(data, cfg.large_batches, "ordered", cfg.seed)
     _schema_evolution(catalog, data, b1_ordered, cfg, checks, log)
 
-    meta = _meta(cfg, started)
     meta["jobs"] = jobs
     meta["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     return GridResult(rows=rows, gates=checks.gates(), meta=meta, problems=checks.problems)

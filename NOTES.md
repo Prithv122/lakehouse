@@ -57,6 +57,30 @@ Working notes: what broke, what was tried, why X over Y.
 - The CLI's `render` re-rendered a different header order than the run: `meta.json` was written
   with sorted keys. Written in insertion order now, and a test checks the re-render is identical.
 
+### 2026-10-23 — review, Amendment 1, 50k gate run
+
+- An independent review (fresh context) found the registered H1/H2 rules count files *written*,
+  not files pruned: day partitioning splits every append into one file per day, so L1 can never
+  plan fewer files than L0. Its 5M-row B1 dry run showed L1 reading 28x fewer bytes and still
+  "not supported". The rules were kept; a bytes-only reading was added as Amendment 1, labelled
+  as defined after the dry run.
+- Other review fixes: the Q6 oracle shared `aggregate()` with the engine path (now plain Python);
+  G3 checked v2 rows only by null count (now full equality); G4's row count was the in-memory
+  count (now read back); the Delta cross-check was stored but never checked (now D1, three ways:
+  fragments, delta-rs native `file_uris`, own evaluator).
+- delta-rs's fragment path widens truncated millisecond timestamp stats by 1 ms, so at an exact
+  millisecond boundary it can keep one file more than the native pruner. Conservative, never
+  drops a match; D1 would show it.
+- Grid cells now run in worker processes (`--jobs`), each with its own warehouse and SQLite
+  catalog. A test runs the same grid serially and with 2 workers and compares every metric.
+- **50,000-row gate run, all 16 cells, 500 tiny appends** (`--jobs 6`, other sessions active,
+  4,521 s): G1 528/528, G2 176, G3 5, G4 24, D1 144/144 passed. Shuffled partitioned B2 tables
+  had 14,474 files. Each cell took 8–35 minutes: the cost is commits, not data.
+- Caution from that run (CI-scale data, not the reported scale): the bytes-only rule called H2b
+  "supported" on a 1.01x difference, which is compression noise from re-sorted files. The rule
+  stays as written; the report prints every ratio, and the write-up must not lean on a
+  "supported" that rests on 1%.
+
 ---
 
 ## Rejected approaches
