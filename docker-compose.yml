@@ -1,0 +1,44 @@
+# Single-node MinIO for the optional S3 run (a smoke check, not a benchmark).
+#
+#   docker compose up -d          start MinIO and create the bucket `lake`
+#   uv run pytest -m minio        run the S3 tests
+#   docker compose down -v        stop and delete the data volume
+#
+# Local development credentials only (minioadmin / minioadmin). They match the defaults in
+# src/lakehouse/catalog.py; override there with LAKEHOUSE_S3_* environment variables.
+#
+# Image note: the upstream minio/minio images are no longer published on Docker Hub (the
+# repository returns 404) and quay.io/minio/minio refuses anonymous pulls, so the final
+# upstream tag could not be verified here. The tags below are Bitnami's archived copies of the
+# same MinIO releases (MinIO 2025.7.23 and mc 2025.7.21). Their existence was checked against
+# the Docker Hub API on 2026-10-23 (both list linux/amd64 and linux/arm64). The archived
+# repository receives no security updates, which is acceptable for a throwaway local container.
+# VERIFIED: tags exist. NOT VERIFIED: that `docker compose up` works (no Docker daemon was
+# running when this file was written).
+
+services:
+  minio:
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/bitnami/minio/data
+
+  # One-shot: wait for MinIO, create the bucket `lake`, exit. Safe to run again.
+  create-bucket:
+    image: bitnamilegacy/minio-client:2025.7.21-debian-12-r3
+    depends_on:
+      - minio
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 2; done &&
+        mc mb --ignore-existing local/lake
+    restart: "no"
+
+volumes:
+  minio-data:
