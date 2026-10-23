@@ -110,3 +110,47 @@ Synthetic data with a chosen skew and diurnal shape; one machine; local filesyst
 reported run (MinIO run is a smoke check, not a benchmark). Planned files and bytes measure I/O
 the planner allows, not time. PyIceberg is not Spark: real Iceberg deployments compact with
 `rewrite_data_files`, sort on write and may read row-group statistics differently.
+
+---
+
+## Amendment 1 — 2026-10-23, before the reported run
+
+**What happened first.** An independent review (fresh context) ran a planning-only dry run of
+regime B1 at 5,000,000 rows for some Iceberg cells, to check feasibility. It showed that the
+`files_planned` half of the H1/H2 rules is decided by how many files a layout *writes*, not by
+pruning: day partitioning splits every append into one file per day touched, so L1 can never plan
+fewer files than L0 for a date query, and user 137 appears in every day partition of every append.
+Numbers it saw (files planned/total, bytes planned): shuffled Q2 L0 10/10, 73.9 MiB vs L1 10/300,
+2.6 MiB; shuffled Q3 L0 10/10 vs L1 70/300; ordered Q1 L1 39/39, 55.8 MiB vs L2s 39/399, 5.3 MiB.
+This amendment is written after seeing those numbers, and says so.
+
+**A1.1 — the registered rules stand.** H1, H2 and H2-L2s are evaluated exactly as written above
+and reported as the primary verdicts, including "not supported".
+
+**A1.2 — a secondary, bytes-only reading, labelled post hoc.** H1b and H2b (and H2b-L2s) use the
+same cells and queries but decide on `bytes_planned` alone: supported iff strictly fewer bytes
+planned for both queries. They are reported under their own heading as defined after the dry run,
+never in place of H1/H2. Files planned stay in the tables as description.
+
+**A1.3 — L2s target unit.** PyIceberg 0.12 applies `write.target-file-size-bytes` to *in-memory
+Arrow* bytes when bin-packing a write (`bin_pack_arrow_table`), not to Parquet bytes on disk, so a
+"1 MiB" L2s file is about 180 KB on disk. The arm is kept as registered (1 MiB of Arrow bytes); the
+README states the unit, and that delta-rs's `target_file_size` is a different measure, so L2s is
+not the same physical layout in the two engines.
+
+**A1.4 — gate wording and strength.**
+- G3 runs on a copy, `bench.events_evolve`, built exactly like `lake.events` (L1, B1, ordered), so
+  `lake.events` stays at schema v1 for the downstream data-quality project. G3 now also checks that
+  the v2 rows read back equal to the v2 rows written, `country` included.
+- G4's row count is read back from the table after compaction, not taken from the written batch.
+- The Q6 oracle is computed by a route that shares no code with the engine path.
+
+**A1.5 — Delta cross-check made explicit.** For every Delta cell and query, three counts of files
+planned are compared: pyarrow fragments filtered with delta-rs's stats guarantees (the reported
+number), delta-rs's native `file_uris(file_pruning_predicate=...)`, and the stats evaluator in
+`delta_arm.py`. Any disagreement is listed as check **D1** in the report and marks the Delta
+section as untrusted. D1 does not affect the Iceberg verdicts.
+
+**A1.6 — scale.** CI runs the gates on a reduced grid (1,200 rows); the gates are run once at
+50,000 rows with 500 tiny appends locally before the reported run, and that run is recorded in
+`NOTES.md`.
