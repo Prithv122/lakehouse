@@ -1,0 +1,139 @@
+{
+  "gates": [
+    {
+      "name": "G1",
+      "passed": true,
+      "detail": "528 checks passed"
+    },
+    {
+      "name": "G2",
+      "passed": true,
+      "detail": "176 checks passed"
+    },
+    {
+      "name": "G3",
+      "passed": true,
+      "detail": "5 checks passed"
+    },
+    {
+      "name": "G4",
+      "passed": true,
+      "detail": "24 checks passed"
+    },
+    {
+      "name": "D1",
+      "passed": true,
+      "detail": "144 checks passed"
+    }
+  ],
+  "verdicts": [
+    {
+      "hypothesis": "H1",
+      "scope": "ordered",
+      "status": "not supported",
+      "evidence": "L1 vs L0; Q2_one_day: files 1 vs 1, bytes 1.8 MiB vs 4.6 MiB (bytes ratio 2.53x) -> fail; Q3_seven_days: files 9 vs 3, bytes 12.8 MiB vs 13.7 MiB (bytes ratio 1.07x) -> fail"
+    },
+    {
+      "hypothesis": "H1",
+      "scope": "shuffled",
+      "status": "not supported",
+      "evidence": "L1 vs L0; Q2_one_day: files 10 vs 10, bytes 2.6 MiB vs 73.9 MiB (bytes ratio 28.22x) -> fail; Q3_seven_days: files 70 vs 10, bytes 18.3 MiB vs 73.9 MiB (bytes ratio 4.04x) -> fail"
+    },
+    {
+      "hypothesis": "H2",
+      "scope": "ordered",
+      "status": "not supported",
+      "evidence": "L2 vs L1; Q1_point_user: files 39 vs 39 -> fail (bytes 66.8 MiB vs 55.8 MiB, ratio 0.84x); Q5_user_week: files 9 vs 9 -> fail (bytes 15.5 MiB vs 12.8 MiB, ratio 0.83x)"
+    },
+    {
+      "hypothesis": "H2",
+      "scope": "shuffled",
+      "status": "not supported",
+      "evidence": "L2 vs L1; Q1_point_user: files 300 vs 300 -> fail (bytes 70.9 MiB vs 78.6 MiB, ratio 1.11x); Q5_user_week: files 70 vs 70 -> fail (bytes 16.5 MiB vs 18.3 MiB, ratio 1.11x)"
+    },
+    {
+      "hypothesis": "H3",
+      "scope": "L0/ordered",
+      "status": "supported",
+      "evidence": "files_total B2 500 vs B2c 1 = 500.00x (needs >= 10x); G4 passed"
+    },
+    {
+      "hypothesis": "H3",
+      "scope": "L0/shuffled",
+      "status": "supported",
+      "evidence": "files_total B2 500 vs B2c 1 = 500.00x (needs >= 10x); G4 passed"
+    },
+    {
+      "hypothesis": "H3",
+      "scope": "L1/ordered",
+      "status": "supported",
+      "evidence": "files_total B2 529 vs B2c 30 = 17.63x (needs >= 10x); G4 passed"
+    },
+    {
+      "hypothesis": "H3",
+      "scope": "L1/shuffled",
+      "status": "supported",
+      "evidence": "files_total B2 15000 vs B2c 30 = 500.00x (needs >= 10x); G4 passed"
+    },
+    {
+      "hypothesis": "H3",
+      "scope": "L2/ordered",
+      "status": "supported",
+      "evidence": "files_total B2 529 vs B2c 30 = 17.63x (needs >= 10x); G4 passed"
+    },
+    {
+      "hypothesis": "H3",
+      "scope": "L2/shuffled",
+      "status": "supported",
+      "evidence": "files_total B2 15000 vs B2c 30 = 500.00x (needs >= 10x); G4 passed"
+    },
+    {
+      "hypothesis": "H2-L2s",
+      "scope": "ordered",
+      "status": "not supported",
+      "evidence": "L2s vs L1; Q1_point_user: files 39 vs 39 -> fail (bytes 5.3 MiB vs 55.8 MiB, ratio 10.48x); Q5_user_week: files 9 vs 9 -> fail (bytes 1.2 MiB vs 12.8 MiB, ratio 10.37x)"
+    },
+    {
+      "hypothesis": "H2-L2s",
+      "scope": "shuffled",
+      "status": "not supported",
+      "evidence": "L2s vs L1; Q1_point_user: files 300 vs 300 -> fail (bytes 54.9 MiB vs 78.6 MiB, ratio 1.43x); Q5_user_week: files 70 vs 70 -> fail (bytes 12.8 MiB vs 18.3 MiB, ratio 1.43x)"
+    },
+    {
+      "hypothesis": "H1b",
+      "scope": "ordered",
+      "status": "supported",
+      "evidence": "L1 vs L0; Q2_one_day: bytes 1.8 MiB vs 4.6 MiB (bytes ratio 2.53x) -> pass (files 1 vs 1); Q3_seven_days: bytes 12.8 MiB vs 13.7 MiB (bytes ratio 1.07x) -> pass (files 9 vs 3)"
+    },
+    {
+      "hypothesis": "H1b",
+      "scope": "shuffled",
+      "status": "supported",
+      "evidence": "L1 vs L0; Q2_one_day: bytes 2.6 MiB vs 73.9 MiB (bytes ratio 28.22x) -> pass (files 10 vs 10); Q3_seven_days: bytes 18.3 MiB vs 73.9 MiB (bytes ratio 4.04x) -> pass (files 70 vs 10)"
+    },
+    {
+      "hypothesis": "H2b",
+      "scope": "ordered",
+      "status": "not supported",
+      "evidence": "L2 vs L1; Q1_point_user: bytes 66.8 MiB vs 55.8 MiB (bytes ratio 0.84x) -> fail (files 39 vs 39); Q5_user_week: bytes 15.5 MiB vs 12.8 MiB (bytes ratio 0.83x) -> fail (files 9 vs 9)"
+    },
+    {
+      "hypothesis": "H2b",
+      "scope": "shuffled",
+      "status": "supported",
+      "evidence": "L2 vs L1; Q1_point_user: bytes 70.9 MiB vs 78.6 MiB (bytes ratio 1.11x) -> pass (files 300 vs 300); Q5_user_week: bytes 16.5 MiB vs 18.3 MiB (bytes ratio 1.11x) -> pass (files 70 vs 70)"
+    },
+    {
+      "hypothesis": "H2b-L2s",
+      "scope": "ordered",
+      "status": "supported",
+      "evidence": "L2s vs L1; Q1_point_user: bytes 5.3 MiB vs 55.8 MiB (bytes ratio 10.48x) -> pass (files 39 vs 39); Q5_user_week: bytes 1.2 MiB vs 12.8 MiB (bytes ratio 10.37x) -> pass (files 9 vs 9)"
+    },
+    {
+      "hypothesis": "H2b-L2s",
+      "scope": "shuffled",
+      "status": "supported",
+      "evidence": "L2s vs L1; Q1_point_user: bytes 54.9 MiB vs 78.6 MiB (bytes ratio 1.43x) -> pass (files 300 vs 300); Q5_user_week: bytes 12.8 MiB vs 18.3 MiB (bytes ratio 1.43x) -> pass (files 70 vs 70)"
+    }
+  ]
+}

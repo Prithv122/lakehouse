@@ -92,8 +92,92 @@ flowchart LR
 
 ## 5. Results
 
-_Pending the 5,000,000-row run. Every number here will be copied from `results/REPORT.md`,
-which the code writes; nothing is filled in by hand._
+5,000,000 synthetic rows, seed 35, PyIceberg 0.12.0 / deltalake 1.6.6 / pyarrow 25.0.1, Windows
+11, run at commit `dbc2dda` on 2026-10-23 (56 minutes, 5 worker processes). All numbers are
+copied from [`results/REPORT.md`](results/REPORT.md), which the code writes; the full per-cell
+table is [`results/pruning.csv`](results/pruning.csv). Bytes are Parquet bytes the planner keeps
+after partition and min/max pruning, not bytes a reader finally decodes.
+
+**Correctness gates: all passed.** G1 528/528 query results equal the oracle; G2 176 time-travel
+reads exact; G3 adding `country` rewrote 0 data files; G4 compaction lost no row; D1 the three
+Delta pruning counts agreed on all 144 checks.
+
+### Verdicts
+
+| Hypothesis | Ordered arrival | Shuffled arrival |
+|---|---|---|
+| **H1** (registered): day partitioning plans fewer files *and* bytes for date queries | not supported | not supported |
+| **H1b** (Amendment 1, bytes only, defined after a dry run) | supported, one day 2.53x fewer bytes, seven days 1.07x | supported, one day **28.2x** fewer bytes, seven days 4.04x |
+| **H2** (registered): sorting by user plans fewer files for user queries | not supported | not supported |
+| **H2b** (bytes only) | not supported: sorted files are *bigger*, 0.84x | "supported" at 1.11x, but the same 300 files are planned: this is better compression of sorted data, not pruning |
+| **H3**: compaction cuts files by >= 10x, results unchanged | supported for L0, L1, L2 (17.6x to 500x) | supported (500x; 15,000 files to 30) |
+
+H1 fails for a reason the registration missed: day partitioning splits every append into one
+file per day, so a partitioned table can never plan fewer *files* than an unpartitioned one
+here, even while it reads 28 times fewer bytes. Amendment 1 kept the original verdict and added
+the bytes reading in the open.
+
+### What the numbers say
+
+1. **Partitioning by day pays off only when arrival order does not already cluster time.**
+   Appending in time order gave the unpartitioned table files with narrow `event_ts` ranges, so
+   a one-day query already planned 1 of 10 files (4.6 MiB); partitioning cut that to 1.8 MiB.
+   With shuffled arrival the unpartitioned table had to read everything (73.9 MiB) and the
+   partitioned one read 2.6 MiB.
+
+   | One-day query, regime B1 | L0 unpartitioned | L1 by day |
+   |---|---|---|
+   | Ordered arrival | 1/10 files · 4.6 MiB | 1/39 files · 1.8 MiB |
+   | Shuffled arrival | 10/10 files · 73.9 MiB | 10/300 files · 2.6 MiB |
+
+2. **Sorting by user did nothing at the default file size, and cost space.** At PyIceberg's
+   512 MiB target each day partition of an append is one file holding every user id, so min/max
+   pruning cannot skip it. In time order the sorted table was 20% larger (66.8 vs 55.8 MiB
+   planned for a user lookup), most likely because timestamps compress worse once rows are
+   ordered by user (the cause was not isolated).
+
+3. **Sorting plus small files is what makes user lookups cheap.** With a 1 MiB target (L2s,
+   measured in in-memory Arrow bytes; on disk the files average about 160 KB, 63.6 MiB in 399) each day partition splits into
+   files covering disjoint user ranges. The user lookup then planned 39 of 399 files and
+   **5.3 MiB instead of 55.8 MiB (10.5x less)**; the user-and-week query 1.2 vs 12.8 MiB. The
+   price is ten times as many files. With shuffled arrival each partition of an append was only
+   just over 1 MiB, so it split in two and the gain shrank to 1.43x.
+
+4. **500 tiny appends make metadata and storage worse, and compaction fixes both.** Shuffled
+   tiny appends wrote 15,000 files and 500 manifests for one 5M-row table; the user lookup
+   planned 118.4 MiB. Compaction left 30 files and 1 manifest, and the same query planned
+   55.9 MiB: half the bytes were small-file overhead.
+
+5. **Compaction can make queries worse.** The unpartitioned table, compacted into a single
+   file, lost the time clustering that its 500 ordered appends had given it: the one-day query
+   went from 1.9 MiB planned to **40.1 MiB (21x more)**. Compacting without a layout throws
+   away pruning; the partitioned and small-file layouts kept theirs (one day 1.8 MiB, user
+   lookup on L2s 5.2 MiB after compaction).
+
+| Compaction, regime B2 → B2c | Files | One-day query | User lookup |
+|---|---|---|---|
+| L0, ordered | 500 → 1 | 1.9 → 40.1 MiB | 53.6 → 40.1 MiB |
+| L1, shuffled | 15,000 → 30 | 3.9 → 1.8 MiB | 118.4 → 55.9 MiB |
+| L2s, ordered | 529 → 390 | 2.1 → 2.2 MiB | 60.7 → 5.2 MiB |
+
+### Delta Lake (descriptive)
+
+delta-rs pruned the same way Iceberg did wherever the layouts match: one-day query on the
+ordered unpartitioned table 1 of 10 files, on day partitions 1 of 39. Delta stores a derived
+`event_date` partition column, and since the queries filter on `event_ts`, its date pruning came
+from min/max statistics, not partition values. Its files were larger for the same rows (71.2 vs
+45.8 MiB for the ordered unpartitioned table); the default codecs differ (not isolated here).
+delta-rs's `target_file_size` counts different bytes from PyIceberg's, so "L2s" split ordered
+partitions into 129 files rather than 399 and did not split shuffled ones at all; the Delta L2s
+column is therefore not the same layout as Iceberg's.
+
+### Limits
+
+Synthetic data with a chosen skew; one machine; local filesystem. Planned bytes are what the
+planner allows a reader to fetch, not query time; no wall-clock numbers are reported. PyIceberg
+is not Spark: production Iceberg compacts with `rewrite_data_files`, can sort on write and may
+prune differently. One seed; the metrics are deterministic for it (tested serially and in
+parallel), but another skew or day count would move every ratio.
 
 ## 6. How to run
 
@@ -118,7 +202,19 @@ The MinIO run is a smoke check, not part of the measurement.
 
 ## 7. What I'd change at 100× scale
 
-_Written after the results._
+- **Object storage and a real catalog.** 500 million rows means S3 or GCS with a REST or Glue
+  catalog, not SQLite. The planned-bytes metric becomes a request and egress bill, so I would
+  log it per query in production rather than only in an experiment.
+- **Compaction as a scheduled, layout-aware job.** Result 5 is the warning: rewrite per
+  partition with the table's sort order (Spark or a managed service's `rewrite_data_files`),
+  never into one undifferentiated file, and run it on a small-file count threshold.
+- **Choose the clustering key from the query log.** User lookups only got cheap with sorted,
+  small files. At scale I'd measure which predicates dominate and use Z-order or a bucket
+  partition on `user_id` instead of guessing, and re-run this harness to check the bytes.
+- **Commit throughput.** Each PyIceberg commit cost about 0.3 s here; thousands of tiny appends
+  an hour need batching upstream (a stream buffer or micro-batches) before they reach the table.
+- **Snapshot expiry.** Time travel kept every old file alive; production needs a retention
+  window and `expire_snapshots`, or storage grows with every compaction.
 
 ## References
 
