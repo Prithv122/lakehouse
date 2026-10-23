@@ -79,9 +79,7 @@ LAYOUTS: dict[str, LayoutSpec] = {
     "L0": LayoutSpec("L0", False, False, None, True, "unpartitioned, arrival order"),
     "L1": LayoutSpec("L1", True, False, None, True, "partitioned by day(event_ts)"),
     "L2": LayoutSpec("L2", True, True, None, True, "L1 + each batch sorted by user_id"),
-    "L2s": LayoutSpec(
-        "L2s", True, True, 1024 * 1024, False, "L2 with a 1 MiB target file size"
-    ),
+    "L2s": LayoutSpec("L2s", True, True, 1024 * 1024, False, "L2 with a 1 MiB target file size"),
 }
 PRIMARY_LAYOUTS = tuple(k for k, v in LAYOUTS.items() if v.primary)
 
@@ -121,7 +119,11 @@ def _day_range(start: dt.datetime, days: int) -> tuple[Pred, Pred]:
 
 
 QUERIES: tuple[Query, ...] = (
-    Query("Q1_point_user", f"all events of user_id = {POINT_USER}", (Pred("user_id", "==", POINT_USER),)),
+    Query(
+        "Q1_point_user",
+        f"all events of user_id = {POINT_USER}",
+        (Pred("user_id", "==", POINT_USER),),
+    ),
     Query("Q2_one_day", "all events on one day (day 10)", _day_range(Q_DAY, 1)),
     Query("Q3_seven_days", "all events over seven days (days 10-16)", _day_range(Q_DAY, 7)),
     Query("Q4_purchases", "all purchase events", (Pred("event_name", "==", "purchase"),)),
