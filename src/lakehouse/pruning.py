@@ -118,6 +118,22 @@ def _rowgroup_counts(table: Table, tasks: list, preds: tuple[spec.Pred, ...]) ->
     return total, matching
 
 
+def _planned_tasks(table: Table, query: spec.Query, snapshot_id: int | None) -> list:
+    snap = _snapshot(table, snapshot_id)
+    if snap is None:
+        return []
+    scan = table.scan(row_filter=to_iceberg_expr(query.preds), snapshot_id=snap.snapshot_id)
+    return list(scan.plan_files())
+
+
+def plan_files_only(table: Table, query: spec.Query, snapshot_id: int | None = None) -> int:
+    """Number of data files the planner keeps for `query`: the filtered plan and nothing else.
+
+    No totals, no byte sums, no row-group footers, so it is the cheap call to time.
+    """
+    return len(_planned_tasks(table, query, snapshot_id))
+
+
 def plan_metrics(
     table: Table,
     query: spec.Query,
@@ -129,14 +145,18 @@ def plan_metrics(
     The planned set is `scan(row_filter).plan_files()`: partition pruning, then each file's
     column min/max from the manifest. With `rowgroups=True` it also opens the footer of each
     planned file and counts row groups, and those whose own statistics could match.
+
+    Raises RuntimeError if any planned task carries delete files: a scan would also read them, so
+    the bytes and records here would be undercounted. This harness never writes deletes.
     """
     totals = table_totals(table, snapshot_id)
-    snap = _snapshot(table, snapshot_id)
-    if snap is None:
-        tasks: list = []
-    else:
-        scan = table.scan(row_filter=to_iceberg_expr(query.preds), snapshot_id=snap.snapshot_id)
-        tasks = list(scan.plan_files())
+    tasks = _planned_tasks(table, query, snapshot_id)
+    with_deletes = [t.file.file_path for t in tasks if t.delete_files]
+    if with_deletes:
+        raise RuntimeError(
+            f"{len(with_deletes)} planned file(s) have delete files (e.g. {with_deletes[0]}); "
+            "planned bytes would be undercounted"
+        )
     rg_total = rg_match = None
     if rowgroups:
         rg_total, rg_match = _rowgroup_counts(table, tasks, query.preds)

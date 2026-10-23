@@ -339,6 +339,52 @@ def test_records_planned_never_below_result_rows(tmp_path):
             assert m.records_planned <= m.records_total
 
 
+def test_plan_files_only_matches_plan_metrics(tmp_path):
+    table = make_table(tmp_path, True)
+    for i in range(3):
+        table.append(events(1500, first_id=i * 1500, seed=40 + i))
+    first = table.snapshots()[0].snapshot_id
+    for q in spec.QUERIES:
+        assert pruning.plan_files_only(table, q) == pruning.plan_metrics(table, q).files_planned
+    q2 = Q["Q2_one_day"]
+    assert pruning.plan_files_only(table, q2, first) == 1
+    assert pruning.plan_files_only(table, q2) == 3
+
+
+def test_plan_files_only_on_an_empty_table_is_zero(tmp_path):
+    table = make_table(tmp_path, False)
+    assert pruning.plan_files_only(table, Q["Q1_point_user"]) == 0
+
+
+def test_plan_metrics_refuses_tasks_with_delete_files(tmp_path, monkeypatch):
+    table = make_table(tmp_path, False)
+    table.append(events(500, first_id=0, seed=50))
+    real = pruning._planned_tasks
+
+    class WithDeletes:
+        """A planned task that claims a delete file applies to it."""
+
+        def __init__(self, task):
+            self.file = task.file
+            self.delete_files = {object()}
+
+    monkeypatch.setattr(
+        pruning, "_planned_tasks", lambda *a, **k: [WithDeletes(t) for t in real(*a, **k)]
+    )
+    with pytest.raises(RuntimeError, match="delete files"):
+        pruning.plan_metrics(table, Q["Q6_full_agg"])
+    # the file-count helper does not look at bytes, so it is unaffected
+    assert pruning.plan_files_only(table, Q["Q6_full_agg"]) == 1
+
+
+def test_plan_metrics_accepts_real_tasks_without_deletes(tmp_path):
+    table = make_table(tmp_path, False)
+    table.append(events(500, first_id=0, seed=51))
+    tasks = pruning._planned_tasks(table, Q["Q6_full_agg"], None)
+    assert tasks and all(not t.delete_files for t in tasks)
+    assert pruning.plan_metrics(table, Q["Q6_full_agg"]).files_planned == len(tasks)
+
+
 def test_totals_match_inspect_and_manifest_count(tmp_path):
     table = make_table(tmp_path, True)
     snaps = []
