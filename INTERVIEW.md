@@ -48,7 +48,7 @@ time-ordered table 20% bigger); with sorted 1 MiB files a user lookup dropped fr
 5.3 MiB in time-ordered arrival (1.4x when shuffled), at the price of ten times as many files.
 500 tiny shuffled appends made 15,000 files, and the user lookup planned roughly twice the bytes
 of the compacted table (118.4 vs 55.9 MiB); compaction took it to 30 files. The surprise was the other direction: compacting the
-unpartitioned, time-ordered table into one file made the one-day query read 21 times more, 1.9 to 40.1 MiB,
+unpartitioned, time-ordered table into one file made the one-day query plan 21 times more bytes, 1.9 to 40.1 MiB,
 because compaction threw away the clustering the small appends had. So my answer to "should we
 compact?" is "yes, but per partition, and with a sort order plus a small target file size if you want
 user-key pruning, or you can make reads worse". On the

@@ -7,9 +7,9 @@
 
 [![CI](https://github.com/Prithv122/lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/Prithv122/lakehouse/actions/workflows/ci.yml)
 
-**Live demo:** not deployed — runs locally (and against MinIO with Docker Compose).
+**Live demo:** not deployed — runs locally. **The MinIO / S3 path is written but has never been run** (see §6).
 **Stack:** Python 3.13 · PyIceberg 0.12 (SQL catalog on SQLite) · delta-rs (`deltalake` 1.6) ·
-pyarrow · numpy · MinIO · uv · pytest · ruff
+pyarrow · numpy · uv · pytest · ruff · MinIO compose file (untested)
 
 ---
 
@@ -56,7 +56,7 @@ flowchart LR
 | Piece | Role |
 |---|---|
 | `spec.py` | Schema, layouts, regimes and the six queries. Frozen by `PREREGISTRATION.md` |
-| `catalog.py` | PyIceberg SQL catalog (SQLite) over a local directory or `s3://` on MinIO |
+| `catalog.py` | PyIceberg SQL catalog (SQLite) over a local directory (tested) or `s3://` on MinIO (written, never run) |
 | `tables.py` | Create a layout, append batches, time travel, add a column, compact |
 | `workload.py` | Queries as Iceberg and Arrow expressions; an oracle that shares no code with the engine path; canonical fingerprints |
 | `pruning.py` | Files, bytes and records the planner keeps, from manifests and footers only |
@@ -96,7 +96,8 @@ flowchart LR
 11, run at commit `dbc2dda` on 2026-10-23 (56 minutes, 5 worker processes). All numbers are
 copied from [`results/REPORT.md`](results/REPORT.md), which the code writes; the full per-cell
 table is [`results/pruning.csv`](results/pruning.csv). Bytes are Parquet bytes the planner keeps
-after partition and min/max pruning, not bytes a reader finally decodes.
+after partition and min/max pruning, not bytes a reader finally decodes. **They are I/O
+estimates from metadata on synthetic data, not runtime speedups;** no query was timed.
 
 **Correctness gates: all passed.** G1 528/528 query results equal the oracle; G2 176 time-travel
 reads exact; G3 adding `country` rewrote 0 data files; G4 compaction lost no row; D1 the three
@@ -201,7 +202,10 @@ uv run lakehouse --warehouse warehouse workload-report --rows 50000 --jobs 4 --o
 The reported run is `workload-report --rows 5000000 --jobs 5`. `lakehouse render` rebuilds
 `REPORT.md` from `results/pruning.csv` without re-running anything.
 
-**MinIO (optional).** `docker compose up -d` starts MinIO on port 9000 (console 9001, dev
+**MinIO (optional, untested).** Everything in §5 ran on the local filesystem. The S3 path below
+has never been run: Docker was not available, the two `minio` tests have only ever been skipped,
+and the compose file pins archived Bitnami images whose tags were checked to exist but never
+pulled. Treat it as a starting point, not a verified feature. `docker compose up -d` should start MinIO on port 9000 (console 9001, dev
 credentials `minioadmin` / `minioadmin`) and creates the bucket `lake`. Then
 `uv run pytest -m minio` runs the S3 round trips, and any command takes
 `--warehouse s3://lake/warehouse` (Iceberg only; the catalog file stays in `./.lakehouse`).
