@@ -80,10 +80,12 @@ def cmd_time_travel(args) -> int:
 
 def cmd_compact(args) -> int:
     table = _open(args)
-    res = tables.compact(table, args.layout)
+    layout = args.layout or tables.layout_of(table)
+    note = "" if args.layout else ", inferred"
+    res = tables.compact(table, layout)
     print(
-        f"compacted: files {res.files_before} -> {res.files_after}, rows {res.rows_after:,}, "
-        f"snapshot {res.snapshot_before} -> {res.snapshot_after}"
+        f"compacted ({layout}{note}): files {res.files_before} -> {res.files_after}, "
+        f"rows {res.rows_after:,}, snapshot {res.snapshot_before} -> {res.snapshot_after}"
     )
     return 0
 
@@ -129,9 +131,10 @@ def cmd_workload_report(args) -> int:
         delta=not args.no_delta,
         rowgroups=args.rowgroups,
         timing=args.timing,
+        note=args.note,
     )
     log = (lambda _m: None) if args.quiet else (lambda m: print(m, file=sys.stderr))
-    result = run_grid(cfg, log=log)
+    result = run_grid(cfg, log=log, jobs=args.jobs, verbose=not args.quiet)
     _print_rows(result.rows)
     verdicts = _write_outputs(Path(args.out), result.rows, result.gates, result.meta)
     print()
@@ -185,8 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--layout",
         choices=list(LAYOUTS),
-        default="L1",
-        help="write rule for the rewrite (L2/L2s sort by user)",
+        default=None,
+        help="write rule for the rewrite (L2/L2s sort by user); default: inferred from the table",
     )
     s.set_defaults(fn=cmd_compact)
 
@@ -200,6 +203,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-delta", action="store_true", help="skip the Delta arm")
     s.add_argument("--rowgroups", action="store_true", help="also count matching row groups")
     s.add_argument("--timing", action="store_true", help="median wall-clock of 5 runs (local only)")
+    s.add_argument("--jobs", type=int, default=1, help="cells run in this many processes")
+    s.add_argument("--note", default="", help="what else was running, recorded in the report")
     s.add_argument("--out", default="results")
     s.add_argument("--quiet", action="store_true")
     s.set_defaults(fn=cmd_workload_report)

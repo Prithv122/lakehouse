@@ -99,4 +99,5 @@ def test_delta_cross_check_counts_are_recorded(grid):
 
 def test_timing_refuses_parallel_cells(tmp_path):
     with pytest.raises(ValueError, match="timing"):
-        run_grid(GridConfig(warehouse=tmp_path, rows=100, timing=True), log=lambda _m: None, jobs=2)
+        cfg = GridConfig(warehouse=tmp_path, rows=100, tiny_batches=10, timing=True)
+        run_grid(cfg, log=lambda _m: None, jobs=2)
