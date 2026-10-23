@@ -198,6 +198,87 @@ def test_q6_rounds_half_to_even_per_row():
     assert out.column("amount_cents").to_pylist() == [50]
 
 
+HALF_CENT_AMOUNTS = [0.125, 0.375, 2.675, 1.005, 0.005, 4.35, 1.115, 0.285, 2.5, 3.145, 0.0]
+
+
+def test_aggregate_helper_and_oracle_agree_on_half_cent_amounts():
+    """Engine helper (Arrow kernels) and oracle (plain Python round) use the same rule.
+
+    Both round the float product `amount * 100` half to even, so a tie such as 0.125 * 100 = 12.5
+    goes to 12 and 0.375 * 100 = 37.5 to 38; 2.675 * 100 is exactly 267.5 in floating point
+    (-> 268, even) while 1.005 * 100 = 100.49999999999999 is below the tie (-> 100).
+    """
+    rows = [(i, 1, D10, "purchase", a) for i, a in enumerate(HALF_CENT_AMOUNTS)]
+    t = arrow_events(rows)
+    want = sum(round(a * 100) for a in HALF_CENT_AMOUNTS)
+    assert w.aggregate(t).column("amount_cents").to_pylist() == [want]
+    assert w._oracle_aggregate(t).column("amount_cents").to_pylist() == [want]
+    assert round(0.125 * 100) == 12 and round(0.375 * 100) == 38
+    assert 2.675 * 100 == 267.5 and round(2.675 * 100) == 268
+    assert round(1.005 * 100) == 100
+
+
+def test_aggregate_helper_and_oracle_agree_on_random_data():
+    rng = np.random.default_rng(7)
+    n = 20_000
+    # Half of the amounts are exact half-cent values (k / 8 dollars), the rest arbitrary.
+    amounts = np.where(rng.random(n) < 0.5, rng.integers(0, 4000, n) / 8, rng.random(n) * 500)
+    names = rng.choice(spec.EVENT_NAMES, n)
+    null = rng.random(n) < 0.3
+    t = pa.table(
+        {
+            "event_name": names,
+            "amount": pa.array(amounts, mask=null, type=pa.float64()),
+        }
+    )
+    got, want = w.aggregate(t), w._oracle_aggregate(t)
+    assert got.equals(want)
+    assert got.schema.equals(spec.AGG_SCHEMA, check_metadata=True)
+    assert w.fingerprint(got) == w.fingerprint(want)
+
+
+def test_oracle_aggregate_edge_cases():
+    empty = arrow_events([(0, 1, D10, "search", None)]).slice(0, 0)
+    out = w._oracle_aggregate(empty)
+    assert out.num_rows == 0 and out.schema.equals(spec.AGG_SCHEMA, check_metadata=True)
+    t = arrow_events([(0, 1, D10, "b", None), (1, 1, D10, "a", 0.01), (2, 1, D10, "b", None)])
+    assert w._oracle_aggregate(t).to_pylist() == [
+        {"event_name": "a", "events": 1, "amount_cents": 1},
+        {"event_name": "b", "events": 2, "amount_cents": 0},
+    ]
+
+
+def test_oracle_mask_is_independent_of_the_expression_builders(monkeypatch, hand):
+    """The oracle row filter must not call to_arrow_expr, to_iceberg_expr or _scalar."""
+
+    def boom(*_a, **_k):
+        raise AssertionError("oracle used an engine-path helper")
+
+    monkeypatch.setattr(w, "to_arrow_expr", boom)
+    monkeypatch.setattr(w, "to_iceberg_expr", boom)
+    monkeypatch.setattr(w, "_scalar", boom)
+    monkeypatch.setattr(w, "aggregate", boom)
+    for name, ids in HAND_ANSWERS.items():
+        assert w.apply_query(hand, Q[name]).column("event_id").to_pylist() == ids
+    assert w.apply_query(hand, Q["Q6_full_agg"]).num_rows == 6
+
+
+def test_oracle_mask_handles_nulls_chunks_and_units():
+    t = pa.concat_tables(
+        [arrow_events([(0, 1, D10, "x", 1.0)]), arrow_events([(1, 2, D10, "y", None)])]
+    )
+    preds = (spec.Pred("event_name", "==", "y"),)
+    assert w._oracle_mask(t, preds).to_pylist() == [False, True]
+    ns = t.set_column(
+        t.schema.get_field_index("event_ts"),
+        "event_ts",
+        t["event_ts"].cast(pa.timestamp("ns", tz="UTC")),
+    )
+    ge = (spec.Pred("event_ts", ">=", D10),)
+    assert w._oracle_mask(ns, ge).to_pylist() == [True, True]
+    assert w._oracle_mask(t, ()) is None
+
+
 def test_oracle_empty_result_keeps_schema(hand):
     q = spec.Query("none", "", (spec.Pred("user_id", "==", -1),))
     out = w.apply_query(hand, q)

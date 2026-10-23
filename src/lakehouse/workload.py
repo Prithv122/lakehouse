@@ -188,30 +188,90 @@ def fingerprint(t: pa.Table) -> str:
 # --- the oracle and the Iceberg path ------------------------------------------------------------
 
 
+_EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+_ONE_US = dt.timedelta(microseconds=1)
+
+
+def _oracle_values(col: pa.ChunkedArray):
+    """(values, valid) for one column as plain numpy arrays; no expression machinery."""
+    arr = col.combine_chunks()
+    if isinstance(arr, pa.ChunkedArray):  # zero chunks
+        arr = pa.array([], type=col.type)
+    if pa.types.is_string(arr.type) or pa.types.is_large_string(arr.type):
+        values = np.array(arr.to_pylist(), dtype=object)
+        return values, np.array([v is not None for v in values], dtype=bool)
+    if pa.types.is_timestamp(arr.type) and arr.type.unit != "us":
+        arr = arr.cast(pa.timestamp("us", tz=arr.type.tz))
+    valid = arr.is_valid().to_numpy(zero_copy_only=False)
+    values = arr.fill_null(0).cast(pa.int64()).to_numpy(zero_copy_only=False)
+    return values, valid
+
+
+def _oracle_literal(value: int | str | dt.datetime):
+    """A predicate value as a plain Python/numpy comparable (timestamps -> epoch microseconds)."""
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is None:
+            raise ValueError(f"naive datetime in predicate: {value!r}")
+        return (value.astimezone(dt.UTC) - _EPOCH) // _ONE_US
+    return value
+
+
 def _oracle_mask(t: pa.Table, preds: tuple[spec.Pred, ...]):
-    """Row mask built column by column with plain compute kernels (no expression machinery)."""
+    """Row mask built with numpy from plain column values.
+
+    Shares no code with `to_iceberg_expr` / `to_arrow_expr` / `_scalar`: timestamps are compared
+    as integer microseconds since the epoch, strings as Python objects, nulls never match.
+    Returns None when there are no predicates.
+    """
     mask = None
     for p in preds:
-        col, value = t[p.column], _scalar(p.value)
+        values, valid = _oracle_values(t[p.column])
+        literal = _oracle_literal(p.value)
         if p.op == "==":
-            m = pc.equal(col, value)
+            m = values == literal
         elif p.op == ">=":
-            m = pc.greater_equal(col, value)
+            m = values >= literal
         elif p.op == "<":
-            m = pc.less(col, value)
+            m = values < literal
         else:
             raise ValueError(f"unsupported operator {p.op!r}")
-        m = pc.fill_null(m, False)
-        mask = m if mask is None else pc.and_(mask, m)
-    return mask
+        m = np.asarray(m, dtype=bool) & valid
+        mask = m if mask is None else (mask & m)
+    return None if mask is None else pa.array(mask, type=pa.bool_())
+
+
+def _oracle_aggregate(t: pa.Table) -> pa.Table:
+    """Q6 in plain Python: independent of `aggregate` and of any Arrow compute kernel.
+
+    Per row `round(amount * 100)` (Python's round: half to even, on the float product), summed
+    as Python ints per event_name; null amounts are skipped; a group with no amounts gets 0.
+    """
+    counts: dict[str | None, int] = {}
+    cents: dict[str | None, int] = {}
+    for name, amount in zip(t["event_name"].to_pylist(), t["amount"].to_pylist(), strict=True):
+        counts[name] = counts.get(name, 0) + 1
+        cents[name] = cents.get(name, 0) + (0 if amount is None else round(amount * 100))
+    names = sorted(counts, key=lambda n: (n is None, n or ""))
+    return pa.table(
+        {
+            "event_name": pa.array(names, type=pa.string()),
+            "events": pa.array([counts[n] for n in names], type=pa.int64()),
+            "amount_cents": pa.array([cents[n] for n in names], type=pa.int64()),
+        },
+        schema=spec.AGG_SCHEMA,
+    )
 
 
 def apply_query(t: pa.Table, query: spec.Query) -> pa.Table:
-    """The in-memory oracle: run `query` on a plain Arrow table, return its canonical form."""
+    """The in-memory oracle: run `query` on a plain Arrow table, return its canonical form.
+
+    The row filter and the Q6 aggregate use their own implementations (numpy / plain Python), not
+    the helpers the engine paths use, so a bug in one route does not hide in the comparison.
+    """
     mask = _oracle_mask(t, query.preds)
     rows = t if mask is None else t.filter(mask)
     if query.kind == "agg":
-        return aggregate(rows)
+        return _oracle_aggregate(rows)
     return canonicalize(rows, query)
 
 
@@ -219,7 +279,8 @@ def run_iceberg(table: Table, query: spec.Query, snapshot_id: int | None = None)
     """Run `query` through an Iceberg scan (optionally at a snapshot); return its canonical form.
 
     Only V1 columns are read, so a table that gained `country` returns the same result as before.
-    Aggregates are computed here from the scanned rows with the same helper the oracle uses.
+    Aggregates are computed here from the scanned rows with `aggregate`; the oracle uses its own
+    plain-Python route.
     """
     fields = ("event_name", "amount") if query.kind == "agg" else _V1_COLUMNS
     scan = table.scan(
