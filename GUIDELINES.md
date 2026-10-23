@@ -32,7 +32,7 @@ Python 3.13 · uv · PyIceberg 0.12 (SQL catalog on SQLite, pyarrow FileIO) · p
 | `tables.py` | `create_events_table(catalog, identifier, layout, replace=True)`, `split_batches(t, n, arrival, seed)`, `prepare_batch(batch, layout, table)`, `append_batches(table, batches, layout) -> list[int]`, `snapshots(table)`, `time_travel(table, snapshot_id)`, `data_file_paths(table, snapshot_id=None)`, `evolve_add_country(table)`, `compact(table, layout) -> CompactionResult` | L2/L2s sort each batch by `SORT_KEY` before append: PyIceberg does not sort on write |
 | `workload.py` | `to_iceberg_expr(preds)`, `to_arrow_expr(preds)`, `apply_query(t, query)` (in-memory oracle), `run_iceberg(table, query, snapshot_id=None)`, `canonicalize(t, query)`, `fingerprint(t) -> str` | Results compared as canonical tables (`CANONICAL_SCHEMA` / `AGG_SCHEMA`, sorted) |
 | `pruning.py` | `plan_metrics(table, query, snapshot_id=None, rowgroups=False) -> PlanMetrics`, `table_totals(table, snapshot_id=None)` | Planned files = PyIceberg `scan(row_filter).plan_files()`; no data read |
-| `delta_arm.py` | `write_delta(path, batches, layout) -> list[int]`, `delta_plan_metrics(path, query, version=None)`, `run_delta(path, query, version=None)`, `compact_delta(path, layout)`, `evolve_delta_add_country(path)`, `delta_files(path, version=None)` | Descriptive arm, no hypothesis |
+| `delta_arm.py` | `write_delta(path, batches, layout) -> list[int]`, `delta_plan_metrics(path, query, version=None)`, `delta_stats_planned(...)`, `run_delta(path, query, version=None)`, `read_delta(path, version=None)`, `delta_version(path)`, `compact_delta(path, layout)`, `evolve_delta_add_country(path)`, `delta_files(path, version=None)` | Descriptive arm, no hypothesis. Planned files come from delta-rs's own pruning (pyarrow dataset fragments carrying its stats guarantees), cross-checked by a stats evaluator |
 | `contract.py` | `open_table(name="events", namespace="lake", warehouse=None)`, `snapshots(table)`, `to_arrow(table, snapshot_id=None)` | The interface `36-data-quality` consumes |
 | `experiment.py` | `run_grid(config) -> list[MetricRow]` plus gate results | Builds every table, runs every query, checks every gate |
 | `report.py` | `evaluate(rows, gates) -> list[Verdict]`, `render_markdown(...)`, `write_csv(rows, path)` | Verdicts are mechanical, from the rules in the pre-registration |
@@ -68,6 +68,15 @@ first; `to_arrow(table, snapshot_id=None)` returns that snapshot's rows.
 - PyIceberg 0.12 has no data-file rewrite (its `maintenance` has only `expire_snapshots`), so
   compaction is a rewrite in one overwrite transaction. Old snapshots keep their files until
   snapshots are expired, so time travel across a compaction still works.
+- That overwrite is one metadata commit but two snapshots: a DELETE snapshot with 0 records, then
+  the APPEND with the rewritten rows. Anything that walks `snapshots()` (including #36) sees the
+  empty one after a compaction and must not treat it as a real version of the data.
+- Delta has no hidden partitioning, so its day layouts store a derived `event_date` partition
+  column. Queries filter on `event_ts`, so Delta's date pruning comes from min/max stats, not
+  partition values. delta-rs's default target file size is 100 MiB (Iceberg's is 512 MiB);
+  `optimize.compact()` does not re-sort, so a compacted L2 Delta file is a run of sorted pieces.
+- Delta timestamp statistics are truncated to milliseconds; delta-rs widens the max by 1 ms when
+  pruning, and the cross-check evaluator in `delta_arm.py` does the same.
 - PyIceberg ignores a table's sort order when writing. The harness sorts L2/L2s batches itself and
   records the sort order in table metadata. With the default 512 MiB target file size each day
   partition of each append is one file spanning every user id, so file-level pruning by user is
