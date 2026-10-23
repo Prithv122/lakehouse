@@ -139,6 +139,25 @@ def append_batches(table: Table, batches: list[pa.Table], layout: str) -> list[i
     return snapshot_ids
 
 
+def layout_of(table: Table) -> str:
+    """Infer the layout name (L0, L1, L2, L2s) from the table's metadata.
+
+    Unpartitioned -> L0. Partitioned by day: no sort order -> L1; a sort order -> L2s when the
+    target-file-size property equals the L2s target, else L2.
+    """
+    fields = table.spec().fields
+    if not fields:
+        return "L0"
+    if len(fields) != 1 or not isinstance(fields[0].transform, DayTransform):
+        raise ValueError(f"partition spec {table.spec()} is not one of the experiment layouts")
+    if not table.sort_order().fields:
+        return "L1"
+    l2s_size = spec.LAYOUTS["L2s"].target_file_size_bytes
+    if table.properties.get(TARGET_FILE_SIZE_PROPERTY) == str(l2s_size):
+        return "L2s"
+    return "L2"
+
+
 def snapshots(table: Table) -> list[tuple[int, dt.datetime, int]]:
     """(snapshot_id, committed_at in UTC, total records), oldest first."""
     out = []
@@ -196,11 +215,13 @@ def compact(table: Table, layout: str) -> CompactionResult:
     keys = spec.SORT_KEY if spec.LAYOUTS[layout].sort_by_user else (("event_id", "ascending"),)
     ordered = rows.sort_by(list(keys)).cast(table.schema().as_arrow())
     table.overwrite(ordered)
+    # Read back from the table, not from `ordered`: G4 must see what the table now holds.
+    rows_after = table.scan(selected_fields=("event_id",)).to_arrow().num_rows
     return CompactionResult(
         files_before=files_before,
         files_after=len(data_file_paths(table)),
         snapshot_before=snapshot_before,
         snapshot_after=table.current_snapshot().snapshot_id,
         rows_before=rows.num_rows,
-        rows_after=ordered.num_rows,
+        rows_after=rows_after,
     )

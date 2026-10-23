@@ -261,3 +261,35 @@ def test_compact_orders_rows_by_the_layout_rule(catalog, events):
     tables.compact(l2, "L2")
     for path in tables.data_file_paths(l2):
         assert_file_sorted(path, SORT_COLUMNS)
+
+
+def test_compact_reports_rows_read_back_from_the_table(catalog, events, monkeypatch):
+    """rows_after comes from the table after the overwrite, not from the frame that was written."""
+    table, _, _ = build(catalog, events, "L1", batches=4)
+    real_overwrite = table.overwrite
+    monkeypatch.setattr(table, "overwrite", lambda t, *a, **k: real_overwrite(t.slice(1), *a, **k))
+    result = tables.compact(table, "L1")
+    assert result.rows_before == ROWS
+    assert result.rows_after == ROWS - 1  # the table lost a row; the written frame had ROWS
+
+
+@pytest.mark.parametrize("layout", LAYOUT_NAMES)
+def test_layout_of_infers_every_layout(catalog, layout):
+    table = tables.create_events_table(catalog, "lake.infer", layout)
+    assert tables.layout_of(table) == layout
+
+
+def test_layout_of_distinguishes_l2_from_l2s_by_target_size(catalog):
+    l2 = tables.create_events_table(catalog, "lake.a", "L2")
+    l2s = tables.create_events_table(catalog, "lake.b", "L2s")
+    assert tables.TARGET_FILE_SIZE_PROPERTY not in l2.properties
+    assert l2s.properties[tables.TARGET_FILE_SIZE_PROPERTY] == str(
+        spec.LAYOUTS["L2s"].target_file_size_bytes
+    )
+    assert (tables.layout_of(l2), tables.layout_of(l2s)) == ("L2", "L2s")
+
+
+def test_layout_of_survives_data_and_schema_evolution(catalog, events):
+    table, _, _ = build(catalog, events, "L2", batches=2)
+    tables.evolve_add_country(table)
+    assert tables.layout_of(table) == "L2"
