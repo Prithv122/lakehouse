@@ -318,6 +318,7 @@ HEADINGS = [
     "## Run metadata",
     "## Correctness gates",
     "## Verdicts",
+    "## Secondary reading (Amendment 1, defined after a dry run)",
     "## Sensitivity (H2-L2s)",
     "## Iceberg pruning",
     "## Compaction (B2 vs B2c)",
@@ -357,10 +358,15 @@ def test_render_marks_failed_gate_and_invalid_verdicts():
 
 def test_render_sensitivity_is_separate_from_main_verdicts():
     md = _render()
-    main = md[md.index("## Verdicts") : md.index("## Sensitivity")]
+    main = md[md.index("## Verdicts") : md.index("## Secondary reading")]
+    secondary = md[md.index("## Secondary reading") : md.index("## Sensitivity")]
     sens = md[md.index("## Sensitivity") : md.index("## Iceberg pruning")]
     assert "H2-L2s" not in main
     assert "H2-L2s" in sens
+    assert "H2b-L2s" in sens
+    assert "H2b-L2s" not in secondary
+    assert "H1b" in secondary
+    assert "H1b" not in main
 
 
 def test_render_compaction_and_rowgroups():
@@ -437,3 +443,208 @@ def test_json_round_trip_of_gates(tmp_path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert [v["status"] for v in payload["verdicts"]] == [v.status for v in verdicts]
     assert set(payload["verdicts"][0]) == {"hypothesis", "scope", "status", "evidence"}
+
+
+# --- amendment 1: secondary bytes-only readings, D1, cross-check ------------------------------
+
+D1_PASS = Gate("D1", True, "all Delta cells agree")
+D1_FAIL = Gate("D1", False, "3 cells disagree")
+
+
+def _dry_run_rows():
+    """The B1 dry run of Amendment 1: L0 10/10 files 73.9 MiB vs L1 10/300 files 2.6 MiB."""
+    mib = 1024 * 1024
+    rows = edit(
+        make_grid(),
+        {"files_planned": 10, "bytes_planned": int(73.9 * mib)},
+        layout="L0",
+        regime="B1",
+        arrival="shuffled",
+    )
+    rows = edit(
+        rows,
+        {"files_planned": 10, "bytes_planned": int(2.6 * mib)},
+        layout="L1",
+        regime="B1",
+        arrival="shuffled",
+        query="Q2_one_day",
+    )
+    return edit(
+        rows,
+        {"files_planned": 70, "bytes_planned": int(18 * mib)},
+        layout="L1",
+        regime="B1",
+        arrival="shuffled",
+        query="Q3_seven_days",
+    )
+
+
+def test_h1b_supported_when_bytes_lower_but_files_not():
+    v = report.evaluate(_dry_run_rows(), ALL_PASS)
+    assert get(v, "H1", "shuffled").status == "not supported"
+    h1b = get(v, "H1b", "shuffled")
+    assert h1b.status == "supported"
+    assert "Q2_one_day: bytes 2.6 MiB vs 73.9 MiB" in h1b.evidence
+    assert "files 10 vs 10" in h1b.evidence
+    # The ordered arrival was left at the baseline, so both readings agree there.
+    assert get(v, "H1", "ordered").status == "supported"
+    assert get(v, "H1b", "ordered").status == "supported"
+
+
+def test_bytes_only_readings_need_strictly_fewer_bytes_for_both_queries():
+    rows = edit(
+        make_grid(), {"bytes_planned": 10_000}, layout="L1", regime="B1", query="Q3_seven_days"
+    )
+    v = report.evaluate(rows, ALL_PASS)
+    assert get(v, "H1b", "ordered").status == "not supported"
+    # Files still improve, bytes do not: H2b fails while the files-only H2 holds.
+    rows = edit(make_grid(), {"bytes_planned": 10_000}, layout="L2", regime="B1")
+    v = report.evaluate(rows, ALL_PASS)
+    assert get(v, "H2", "ordered").status == "supported"
+    assert get(v, "H2b", "ordered").status == "not supported"
+    assert get(v, "H2b-L2s", "ordered").status == "supported"
+
+
+def test_bytes_only_readings_ignore_files():
+    rows = edit(make_grid(), {"files_planned": 10}, layout="L2", regime="B1")
+    v = report.evaluate(rows, ALL_PASS)
+    assert get(v, "H2", "ordered").status == "not supported"
+    assert get(v, "H2b", "ordered").status == "supported"
+
+
+def test_bytes_only_readings_not_evaluated_when_cells_missing():
+    v = report.evaluate(make_grid(layouts=("L0", "L1", "L2")), ALL_PASS)
+    assert get(v, "H2b-L2s", "ordered").status == "not evaluated"
+    assert get(v, "H2b", "ordered").status == "supported"
+    v = report.evaluate(make_grid(arrivals=("ordered",)), ALL_PASS)
+    assert get(v, "H1b", "shuffled").status == "not evaluated"
+
+
+def test_h2_evidence_shows_bytes_but_decides_on_files():
+    v = report.evaluate(make_grid(), ALL_PASS)
+    ev = get(v, "H2", "ordered").evidence
+    assert "bytes" in ev
+    assert "Q1_point_user: files 4 vs 10 -> pass" in ev
+    assert "bytes 3.9 KiB vs 9.8 KiB" in ev
+
+
+def test_d1_failure_does_not_invalidate_iceberg_verdicts():
+    rows = make_grid() + make_grid(engine="delta")
+    v = report.evaluate(rows, [*ALL_PASS, D1_FAIL])
+    assert {x.status for x in v} == {"supported"}
+    assert {x.hypothesis for x in v} >= {"H1", "H1b", "H2", "H2b", "H2-L2s", "H2b-L2s", "H3"}
+    assert report.evaluate(rows, [*ALL_PASS, D1_PASS]) == v
+    assert report.evaluate(rows, ALL_PASS) == v  # missing D1 is fine too
+
+
+def test_g1_failure_still_invalidates_secondary_verdicts_even_with_d1_passing():
+    gates = [Gate("G1", False, "mismatch"), *ALL_PASS[1:], D1_PASS]
+    v = report.evaluate(make_grid(), gates)
+    for hyp in ("H1b", "H2b", "H2b-L2s"):
+        assert get(v, hyp, "ordered").status == "invalid"
+        assert "G1" in get(v, hyp, "ordered").evidence
+    assert {x.status for x in v} == {"invalid"}
+
+
+def test_gates_table_lists_g1_to_g4_first_then_others_in_given_order():
+    gates = [D1_FAIL, Gate("X9", True, "extra"), ALL_PASS[3], ALL_PASS[1], ALL_PASS[0], ALL_PASS[2]]
+    md = _render(gates=gates)
+    section = md[md.index("## Correctness gates") : md.index("## Verdicts")]
+    order = [section.index(f"| {n} |") for n in ("G1", "G2", "G3", "G4", "D1", "X9")]
+    assert order == sorted(order)
+    assert "| D1 | FAIL | 3 cells disagree |" in section
+
+
+def test_secondary_section_text_and_content():
+    md = _render()
+    sec = md[md.index("## Secondary reading") : md.index("## Sensitivity")]
+    assert "defined after seeing a B1 dry run" in sec
+    assert "do not replace H1 and H2" in sec
+    assert "| H1b | ordered | supported |" in sec
+    assert "| H2b | shuffled | supported |" in sec
+
+
+def _delta_grid_with_extras(disagree: bool = False):
+    rows = make_grid(engine="delta")
+    rows = [
+        dataclasses.replace(
+            r, extra={"native_files": str(r.files_planned), "own_eval_files": str(r.files_planned)}
+        )
+        for r in rows
+    ]
+    if disagree:
+        rows = edit(
+            rows,
+            {"extra": {"native_files": "4", "own_eval_files": "3"}},
+            layout="L1",
+            regime="B1",
+            arrival="ordered",
+            query="Q2_one_day",
+        )
+    return rows
+
+
+D1_LINE = "**D1 failed: Delta planned counts disagree; treat this section as untrusted.**"
+
+
+def test_delta_cross_check_table_renders_with_marker_for_disagreement():
+    rows = make_grid() + _delta_grid_with_extras(disagree=True)
+    md = _render(rows, gates=[*ALL_PASS, D1_FAIL])
+    delta = md[md.index("## Delta") : md.index("## Exploratory")]
+    assert delta.index(D1_LINE) < delta.index("Delta has no hypothesis")
+    assert "`fragments/native/own`" in delta
+    assert "| Q2_one_day | 10/10/10 | 3/4/3 ✗ |" in delta
+    assert "| Q1_point_user | 10/10/10 | 4/4/4 | 4/4/4 |" not in delta  # L0 cell is 10/10/10
+    assert "| Q1_point_user | 10/10/10 | 10/10/10 | 4/4/4 | 2/2/2 |" in delta
+    # Once per regime table of the ordered arrival's B1 cell, plus the legend lines.
+    assert delta.count("3/4/3 ✗") == 1
+    # The Iceberg part never carries the cross-check or the D1 line.
+    assert "D1 failed" not in md[: md.index("## Delta")]
+    assert "fragments/native/own" not in md[: md.index("## Delta")]
+
+
+def test_delta_without_extras_or_with_passing_d1_has_no_cross_check_or_warning():
+    md = _render(gates=[*ALL_PASS, D1_PASS])
+    assert "D1 failed" not in md
+    assert "fragments/native/own" not in md
+    md = _render(make_grid() + _delta_grid_with_extras(), gates=[*ALL_PASS, D1_PASS])
+    assert "fragments/native/own" in md
+    assert " ✗ |" not in md
+    assert "D1 failed" not in md
+
+
+def test_cross_check_extras_survive_csv_round_trip(tmp_path):
+    rows = make_grid() + _delta_grid_with_extras(disagree=True)
+    path = tmp_path / "pruning.csv"
+    report.write_csv(rows, path)
+    back = report.read_csv(path)
+    gates = [*ALL_PASS, D1_FAIL]
+    assert _render(back, gates) == _render(rows, gates)
+    assert "3/4/3 ✗" in _render(back, gates)
+
+
+def test_iceberg_bytes_ratio_lines_under_each_regime_table():
+    md = _render()
+    iceberg = md[md.index("## Iceberg pruning") : md.index("## Compaction")]
+    # Baseline grid: L0 10_000 vs L1 3_000 for day queries; L1 10_000 vs L2 4_000 / L2s 2_000.
+    assert "- Q2_one_day: L0/L1 bytes ratio 3.33x" in iceberg
+    assert "- Q3_seven_days: L0/L1 bytes ratio 3.33x" in iceberg
+    assert "- Q1_point_user: L1/L2 bytes ratio 2.50x; L1/L2s bytes ratio 5.00x" in iceberg
+    assert "- Q5_user_week: L1/L2 bytes ratio 2.50x; L1/L2s bytes ratio 5.00x" in iceberg
+    assert "Q4_purchases:" not in iceberg
+    assert iceberg.count("Planned-bytes ratios") == 6  # 2 arrivals x 3 regimes
+    # Delta tables get cross-check handling, never the ratio lines.
+    assert "Planned-bytes ratios" not in md[md.index("## Delta") :]
+
+
+def test_bytes_ratio_lines_skip_missing_layouts():
+    md = _render(make_grid(layouts=("L0", "L1")))
+    iceberg = md[md.index("## Iceberg pruning") : md.index("## Compaction")]
+    assert "L0/L1 bytes ratio" in iceberg
+    assert "L1/L2" not in iceberg
+
+
+def test_render_with_new_sections_is_deterministic():
+    rows = make_grid() + _delta_grid_with_extras(disagree=True)
+    gates = [*ALL_PASS, D1_FAIL]
+    assert _render(rows, gates) == _render(list(reversed(rows)), gates)
