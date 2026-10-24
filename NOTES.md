@@ -83,6 +83,15 @@ Working notes: what broke, what was tried, why X over Y.
 
 ---
 
+### 2026-10-24 — MinIO smoke check
+
+- `docker compose up -d` on Docker Desktop (Windows 11) pulled `bitnamilegacy/minio:2025.7.23-debian-12-r5`
+  and `bitnamilegacy/minio-client:2025.7.21-debian-12-r3`. The bucket job's first `mc alias set` was
+  refused (MinIO still starting); its retry loop handled it and created `lake`.
+- `uv run pytest -m minio`: 2 passed (`test_iceberg_roundtrip_on_s3`, `test_delta_roundtrip_on_s3`).
+  Then `docker compose down -v`. README and the compose comment now say "smoke-tested", not "never run".
+  No workload or measurement ran on MinIO.
+
 ## Rejected approaches
 
 | Approach | Why rejected |

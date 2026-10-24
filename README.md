@@ -7,9 +7,9 @@
 
 [![CI](https://github.com/Prithv122/lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/Prithv122/lakehouse/actions/workflows/ci.yml)
 
-**Live demo:** not deployed — runs locally. **The MinIO / S3 path is written but has never been run** (see §6).
+**Live demo:** not deployed — runs locally. **The MinIO / S3 path has been smoke-tested only** (two round-trip tests, 2026-10-24; see §6).
 **Stack:** Python 3.13 · PyIceberg 0.12 (SQL catalog on SQLite) · delta-rs (`deltalake` 1.6) ·
-pyarrow · numpy · uv · pytest · ruff · MinIO compose file (untested)
+pyarrow · numpy · uv · pytest · ruff · MinIO compose file (smoke-tested)
 
 ---
 
@@ -56,7 +56,7 @@ flowchart LR
 | Piece | Role |
 |---|---|
 | `spec.py` | Schema, layouts, regimes and the six queries. Frozen by `PREREGISTRATION.md` |
-| `catalog.py` | PyIceberg SQL catalog (SQLite) over a local directory (tested) or `s3://` on MinIO (written, never run) |
+| `catalog.py` | PyIceberg SQL catalog (SQLite) over a local directory (tested) or `s3://` on MinIO (two round-trip tests pass; not used for any result) |
 | `tables.py` | Create a layout, append batches, time travel, add a column, compact |
 | `workload.py` | Queries as Iceberg and Arrow expressions; an oracle that shares no code with the engine path; canonical fingerprints |
 | `pruning.py` | Files, bytes and records the planner keeps, from manifests and footers only |
@@ -202,11 +202,13 @@ uv run lakehouse --warehouse warehouse workload-report --rows 50000 --jobs 4 --o
 The reported run is `workload-report --rows 5000000 --jobs 5`. `lakehouse render` rebuilds
 `REPORT.md` from `results/pruning.csv` without re-running anything.
 
-**MinIO (optional, untested).** Everything in §5 ran on the local filesystem. The S3 path below
-has never been run: Docker was not available, the two `minio` tests have only ever been skipped,
-and the compose file pins archived Bitnami images whose tags were checked to exist but never
-pulled. Treat it as a starting point, not a verified feature. `docker compose up -d` should start MinIO on port 9000 (console 9001, dev
-credentials `minioadmin` / `minioadmin`) and creates the bucket `lake`. Then
+**MinIO (optional, smoke-tested).** Everything in §5 ran on the local filesystem. The S3 path was
+checked once, on 2026-10-24 (Docker Desktop on Windows 11): `docker compose up -d` pulled the
+pinned archived Bitnami images, started MinIO on port 9000 (console 9001, dev credentials
+`minioadmin` / `minioadmin`) and created the bucket `lake` (the bucket job retries until MinIO
+is up); `uv run pytest -m minio` then passed both S3 round trips, Iceberg and Delta. That is a
+smoke check of reading and writing through `s3://`, not a measurement: no workload ran on MinIO,
+and the images are an unmaintained archive. Then
 `uv run pytest -m minio` runs the S3 round trips, and any command takes
 `--warehouse s3://lake/warehouse` (Iceberg only; the catalog file stays in `./.lakehouse`).
 The MinIO run is a smoke check, not part of the measurement.

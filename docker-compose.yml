@@ -13,8 +13,8 @@
 # same MinIO releases (MinIO 2025.7.23 and mc 2025.7.21). Their existence was checked against
 # the Docker Hub API on 2026-10-23 (both list linux/amd64 and linux/arm64). The archived
 # repository receives no security updates, which is acceptable for a throwaway local container.
-# VERIFIED: tags exist. NOT VERIFIED: that `docker compose up` works (no Docker daemon was
-# running when this file was written).
+# VERIFIED: tags exist (2026-10-23); `docker compose up -d` pulls them, starts MinIO, creates
+# the bucket, and `pytest -m minio` passes both round trips (2026-10-24, Docker Desktop, Windows).
 
 services:
   minio:
